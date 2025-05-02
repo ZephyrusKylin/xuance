@@ -1,0 +1,129 @@
+# satellite_hierarchical_knowledge.yaml
+####TODO @加value判断行为正确与否和价值
+# 全局参数
+globals:
+  geo_radius_km: 42164
+  engagement_range_km: 2000
+
+strategies:
+  - name: encircle_and_strike
+    priority: 100  ####TODO @如何评估？函数设计
+    type: sequence            # Sequence: 全部子任务都要成功
+    children:
+      - ref: detect_threats
+      - ref: maneuver_to_encircle
+      - ref: execute_strike
+
+  - name: defend_and_evade
+    priority: 80
+    type: selector            # Selector: 尝试第一个成功后结束
+    children:
+      - ref: evade_incoming
+      - ref: return_to_safe_orbit
+
+tasks:
+  # 战术子任务：威胁检测
+  - id: detect_threats
+    type: selector
+    children:
+      - ref: detect_close_enemy
+      - ref: detect_grouped_enemies
+    failure: none             # 都没检测到时，返回失败
+
+  - id: detect_close_enemy
+    type: condition
+    condition:
+      type: any_enemy_within
+      radius_km: 5000
+    success: set_blackboard    # 将最近敌人信息写入黑板
+    failure: none
+
+  - id: detect_grouped_enemies
+    type: condition
+    condition:
+      type: enemies_grouped
+      count: 3
+      radius_km: 10000
+    success: set_blackboard
+    failure: none
+
+  # 战术子任务：包围机动
+  - id: maneuver_to_encircle
+    type: sequence
+    children:
+      - ref: compute_encircle_point
+      - ref: move_to_point
+
+  - id: compute_encircle_point
+    type: action
+    action:
+      type: compute_point
+      mode: encircle
+      distance_km: 3000
+    success: none
+    failure: none
+
+  - id: move_to_point
+    type: action
+    action:
+      type: move_towards
+      target: encircle_point
+      tolerance_km: 10
+    success: none
+    failure: none
+
+  # 战术子任务：执行打击
+  - id: execute_strike
+    type: selector
+    children:
+      - ref: close_in_and_fire
+      - ref: fire_from_distance
+
+  - id: close_in_and_fire
+    type: sequence
+    children:
+      - ref: approach_target
+      - ref: fire_weapon
+
+  - id: approach_target
+    type: action
+    action:
+      type: move_towards
+      target: blackboard.closest_enemy
+      speed: high
+      tolerance_km: 2
+
+  - id: fire_weapon
+    type: action
+    action:
+      type: attack
+      target: blackboard.closest_enemy
+      weapon: laser
+
+  - id: fire_from_distance
+    type: action
+    action:
+      type: attack
+      target: blackboard.closest_enemy
+      weapon: missile
+
+  # 辅助任务：规避机动
+  - id: evade_incoming
+    type: action
+    condition:
+      type: incoming_threat
+      radius_km: 1000
+    action:
+      type: move_random
+      speed: max
+
+  - id: return_to_safe_orbit
+    type: action
+    action:
+      type: move_to_orbit
+      altitude_km: "{{ globals.geo_radius_km + 2000 }}"
+
+blackboard:
+  # 运行时存储中间计算结果
+  closest_enemy: null
+  encircle_point: null

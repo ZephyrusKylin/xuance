@@ -31,3 +31,4 @@ class KnowledgeModule:
         # 从黑板读出最终动作
         action = self.blackboard.get('action', {})
         return action
+##TODO Action具体加权方式
