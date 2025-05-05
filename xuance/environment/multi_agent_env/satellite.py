@@ -9,6 +9,49 @@ except ImportError:
 
 
 class One_on_one_purchase():
+    __annotations__ = {
+        "Pursuer_position": np.ndarray,
+        "Pursuer_vector": np.ndarray,
+        "Escaper_position": np.ndarray,
+        "Escaper_vector": np.ndarray
+    }
+    def __init__(self, Pursuer_position=np.array([2000, 2000, 1000]), Pursuer_vector=np.array([1.71, 1.14, 1.3]),
+                 Escaper_position=np.array([1000, 2000, 0]), Escaper_vector=np.array([1.71, 1.14, 1.3]),
+                 M=0.4, dis_safe=1000, d_capture=100000, Flag=0, fuel_c=320, fuel_t=320, d_range=100000, args=None):
+
+        self.Pursuer_position = Pursuer_position
+        self.Pursuer_vector = Pursuer_vector
+        self.Escaper_position = Escaper_position
+        self.Escaper_vector = Escaper_vector
+        self.dis_dafe = dis_safe            # 碰撞距离
+        self.d_capture = d_capture          # 抓捕距离
+        self.Flag = Flag                    # 训练追捕航天器(0)、逃逸航天器(1)或者测试的标志(2)
+        self.M = M                          # 航天器质量
+        self.d_capture = d_capture
+        self.burn_reward = 0
+        self.win_reward = 100
+        self.dangerous_zone = 0             # 危险区数量
+        self.fuel_c = fuel_c                # 抓捕航天器燃料情况
+        self.fuel_t = fuel_t                # 抓捕航天器燃料情况
+        self.dis = np.inf                   # 博弈距离
+        self.d_range = d_range              # 使用可达域博弈的最小距离
+        self.max_episode_steps = args.max_episode_steps
+        self.ellipse_params = []            # 椭圆拟合参数
+        # 椭圆拟合训练网络
+        self.trian_elliptical_fitting = real_time_data_process.network_method_train(pretrain=False)
+        # 下面声明其基本属性
+        position_low = np.array([-500000, -500000, -500000, -10000000, -10000000, -10000000,-10000000, -10000000, -10000000])
+        position_high = np.array([500000, 500000, 500000, 10000000, 10000000, 10000000, 10000000, 10000000, 10000000])
+        velocity_low = np.array([-10000, -10000, -10000, -50000, -50000, -50000, -50000, -50000, -50000])
+        velocity_high = np.array([10000, 10000, 10000, 50000, 50000, 50000, 50000, 50000, 50000])
+        observation_low = np.concatenate((position_low, velocity_low))
+        observation_high = np.concatenate((position_high, velocity_high))
+        self.observation_space = spaces.Box(low=observation_low, high=observation_high, shape=(18,), dtype=np.float32)
+        self.action_space = np.array([[-1.6, 1.6],
+                                      [-1.6, 1.6],
+                                      [-1.6, 1.6]])
+        n_actions = 5  # 策略的数量
+        self.action_space_beta = gym.spaces.Discrete(n_actions)    # {0,1,2,3,4}
 
 
 
