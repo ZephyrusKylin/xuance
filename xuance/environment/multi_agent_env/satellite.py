@@ -46,7 +46,7 @@ class One_on_one_purchase():
         velocity_high = np.array([10000, 10000, 10000, 50000, 50000, 50000, 50000, 50000, 50000])
         observation_low = np.concatenate((position_low, velocity_low))
         observation_high = np.concatenate((position_high, velocity_high))
-        self.observation_space = spaces.Box(low=observation_low, high=observation_high, shape=(18,), dtype=np.float32)
+        self.observation_space = gym.spaces.Box(low=observation_low, high=observation_high, shape=(18,), dtype=np.float32)
         self.action_space = np.array([[-1.6, 1.6],
                                       [-1.6, 1.6],
                                       [-1.6, 1.6]])
@@ -55,8 +55,22 @@ class One_on_one_purchase():
 
 
 
+    def reset(self, Flag):
+        self.Pursuer_position = np.array([200000, 0 ,0])
+        self.Pursuer_vector = np.array([0, 0, 0])
+        self.pursuer_reward = 0.0
+        self.Escaper_position = np.array([18000, 0, 0])
+        self.Escaper_vector = np.array([0, 0, 0])
+        self.escaper_reward = 0.0
 
+        self.Flag = Flag
 
+        s = np.array([self.Pursuer_position - self.Escaper_position, self.Pursuer_vector - self.Escaper_vector,
+                      self.Pursuer_position, self.Pursuer_vector, self.Escaper_position, self.Escaper_vector]).ravel()
+
+        return s
+
+    def render(self):
 
 
 
