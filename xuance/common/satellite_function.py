@@ -2,8 +2,6 @@
 This module provides hanger zone calculations.
 Reference to《基于轨道可达域的机动航天器接近威胁规避方法》——张赛
 
-Author: Qiao beibei
-Date: April 18, 2024
 """
 
 import numpy as np

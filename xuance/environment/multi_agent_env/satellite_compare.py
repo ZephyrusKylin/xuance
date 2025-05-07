@@ -1460,11 +1460,11 @@ if __name__ == '__main__':
         print(f"1v1测试出错: {e}")
         import traceback; traceback.print_exc() # 打印详细错误信息
 
-    print("\n--- 测试 Many-vs-Many Combat 环境 (例: 7v7) ---")
-    num_a_test = 7 # 使用较小队伍规模进行快速测试
-    num_b_test = 7
+    print("\n--- 测试 Many-vs-Many Combat 环境 (例: 2v2) ---")
+    num_a_test = 2 # 使用较小队伍规模进行快速测试
+    num_b_test = 2
     combat_scenario_config_test = {
-        "scenario_id": "many_vs_many_combat", "max_episode_steps": 500, # 较短的回合
+        "scenario_id": "many_vs_many_combat", "max_episode_steps": 200, # 较短的回合
         "num_team_A": num_a_test, 
         "num_team_B": num_b_test,
         "team_A_composition": ["fighter_std"] * num_a_test, # A队组成
