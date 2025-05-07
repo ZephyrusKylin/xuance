@@ -9,6 +9,7 @@ from xuance.common.memory_tools_marl import BaseBuffer, MARL_OnPolicyBuffer, MAR
     MeanField_OnPolicyBuffer, MeanField_OffPolicyBuffer, COMA_Buffer, COMA_Buffer_RNN, \
     MARL_OffPolicyBuffer, MARL_OffPolicyBuffer_RNN
 from xuance.common.segtree_tool import SegmentTree, SumSegmentTree, MinSegmentTree
+from xuance.common import satellite_function
 
 __all__ = [
     # typing
@@ -28,6 +29,8 @@ __all__ = [
     "MeanField_OnPolicyBuffer", "MeanField_OffPolicyBuffer", "COMA_Buffer", "COMA_Buffer_RNN",
     # segtree_tool
     "SegmentTree", "SumSegmentTree", "MinSegmentTree",
+    # satellite
+    "satellite_function"
 ]
 
 try:

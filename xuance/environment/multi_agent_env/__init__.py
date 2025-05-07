@@ -30,6 +30,13 @@ try:
 except Exception as error:
     REGISTRY_MULTI_AGENT_ENV["StarCraft2"] = str(error)
 
+
+try:
+    from xuance.environment.multi_agent_env.satellite import SatelliteMultiAgentEnv
+    REGISTRY_MULTI_AGENT_ENV['SatelliteMultiAgentEnv'] = SatelliteMultiAgentEnv
+except Exception as error:
+    REGISTRY_MULTI_AGENT_ENV["SatelliteMultiAgentEnv"] = str(error)
+
 __all__ = [
     "REGISTRY_MULTI_AGENT_ENV",
 ]
