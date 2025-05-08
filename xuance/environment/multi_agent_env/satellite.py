@@ -4,9 +4,13 @@ from gymnasium.spaces import Box, Discrete, Dict as GymDict # 从Gymnasium导入
 from xuance.environment import RawMultiAgentEnv # 从xuance框架导入原始多智能体环境基类
 from typing import List, Dict as TypingDict, Optional, Tuple, Any, Union # Python类型提示
 import abc # 导入abc模块，用于定义抽象基类
-
+import cv2
+import pygame
 # 假设 satellite_function.py 包含轨道动力学等辅助函数
 # 例如：from . import satellite_function as sf (如果satellite_function在同一目录下)
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import random
 # 根据实际项目结构调整导入路径
 from xuance.common import satellite_function as sf # 从xuance.common导入卫星功能模块
 
@@ -91,7 +95,12 @@ class Satellite:
                     actual_force_vector = desired_force_vector
         
         # 根据牛顿第二定律 F=ma => a = F/m 更新速度
-        acceleration = actual_force_vector / self.mass
+        # 需要考虑质量不为零
+        if self.mass > 1e-6:
+             acceleration = actual_force_vector / self.mass
+        else:
+             acceleration = np.zeros(3, dtype=np.float32) # 质量过小或为零，不产生加速度
+             
         self.vel += acceleration * time_delta # v_new = v_old + a * dt
         
         actual_thrust_force_magnitude = np.linalg.norm(actual_force_vector) # 计算实际施加推力的大小
@@ -106,10 +115,12 @@ class Satellite:
 
     def take_damage(self, damage: float):
         """卫星受到伤害，减少当前生命值"""
-        # 如果卫星已被摧毁或设计上不能被攻击(例如某些类型的卫星没有生命值或无敌)
-        # 当前逻辑：如果 can_attack 为 False，则不受伤。这暗示不能攻击的卫星是无敌的或非战斗单位。
-        # 如果希望所有卫星都能受伤，应移除 or not self.can_attack
-        if self.is_destroyed: return 
+        # V3.5.1 修正: 移除了 'or not self.can_attack' 条件。
+        # 这允许不能攻击的单位 (例如can_attack=False的scout_std) 也能受到伤害。
+        # 如果一个单位确实不应该受到伤害，应该通过其他方式配置
+        # (例如，极高的生命值，或者一个专门的 'invulnerable' 属性，或者在类型配置中设定为不可被伤害)。
+        if self.is_destroyed: 
+            return 
         
         self.current_health -= damage
         if self.current_health <= 0:
@@ -506,40 +517,52 @@ class MultiSatelliteEnvBase(abc.ABC): # 继承自抽象基类
                       f"位置={sat.pos.round(0)}, 速度={sat.vel.round(1)}, {status}")
         
         elif mode == 'rgb_array': # 返回一个代表环境状态的RGB图像数组 (简化2D渲染)
-            canvas_size=200 # 画布大小 (像素)
-            world_scale=0.00002 # 世界坐标到画布坐标的缩放因子 (根据卫星典型位置调整)
-            canvas=np.ones((canvas_size,canvas_size,3),dtype=np.uint8)*240 # 浅灰色背景 (RGB)
+            canvas_size = 2000  # 画布大小 (像素)
             
-            # 定义队伍颜色 (BGR格式，因为OpenCV常用BGR，但这里直接用RGB也可以)
-            team_colors={"team_A":[0,0,200],"team_B":[200,0,0],"default_team":[100,100,100]} 
+            # --- 调整参数 ---
+            # 估算世界场景的大致范围，例如 X 和 Y 方向各 +/- 75000 的范围
+            # 我们希望这个范围能映射到画布的大部分区域
+            # 如果画布是200像素，我们希望 75000 世界单位映射到大约 90-100 像素
+            # world_scale = 90 / 75000  # 大约 0.0012
+            # 或者更简单地选择一个初始值进行调试：
+            world_scale = 0.001  # 增大这个值会让物体看起来更大，视野更小 (放大)
+                                 # 减小这个值会让物体看起来更小，视野更大 (缩小)
             
-            def world_to_canvas(pos_xy: np.ndarray) -> Tuple[int, int]:
-                """将世界坐标系下的X,Y位置转换为画布像素坐标"""
-                # 画布中心为原点，Y轴向上为正 (标准笛卡尔)，但图像Y轴向下为正，故对Y坐标取反
-                cx = int(canvas_size/2 + pos_xy[0] * world_scale)
-                cy = int(canvas_size/2 - pos_xy[1] * world_scale) # Y轴反转
-                return np.clip(cx, 0, canvas_size-1), np.clip(cy, 0, canvas_size-1)
+            base_radius_pixels = 3 # 卫星在画布上的基础半径（像素），可以适当调大，比如 2 或 3
+            # -----------------
 
-            for sat_id in self.agents: 
+            canvas = np.ones((canvas_size, canvas_size, 3), dtype=np.uint8) * 240 # 浅灰色背景 (RGB)
+
+            team_colors = {"team_A": [0, 0, 200], "team_B": [200, 0, 0], "default_team": [100, 100, 100]}
+
+            def world_to_canvas(pos_xy: np.ndarray) -> Tuple[int, int]:
+                cx = int(canvas_size / 2 + pos_xy[0] * world_scale)
+                cy = int(canvas_size / 2 - pos_xy[1] * world_scale) # Y轴反转
+                return np.clip(cx, 0, canvas_size - 1), np.clip(cy, 0, canvas_size - 1)
+
+            for sat_id in self.agents:
                 sat = self.satellites[sat_id]
                 if not sat.is_destroyed:
-                    # 基于X,Y位置渲染；此2D视图忽略Z轴
-                    cx,cy = world_to_canvas(sat.pos) 
-                    color = team_colors.get(sat.team_id, team_colors["default_team"]) # 获取队伍颜色
-                    # 根据生命值百分比确定半径大小 (例如，满血时半径为3像素，低血量时为1像素)
-                    radius = max(1, int(3 * (sat.current_health / sat.max_health if sat.max_health > 0 else 0.1))) 
+                    cx, cy = world_to_canvas(sat.pos)
+                    color = team_colors.get(sat.team_id, team_colors["default_team"])
                     
+                    # 使用调整后的基础半径，并可以考虑根据生命值略微调整大小
+                    current_radius = base_radius_pixels
+                    # 如果想根据生命值调整，可以恢复类似逻辑，但确保基础值合适：
+                    # current_radius = max(1, int(base_radius_pixels * (sat.current_health / sat.max_health if sat.max_health > 0 else 0.5)))
+
                     # 绘制一个近似的填充圆形
-                    for r_offset in range(-radius, radius + 1):
-                        for c_offset in range(-radius, radius + 1):
-                            if r_offset**2 + c_offset**2 <= radius**2: # 点在圆内
-                                # 确保绘制在画布边界内
+                    # (注意：如果 current_radius 很小，可能画出来还是一个点)
+                    # 为了更清晰，可以直接画一个固定大小的标记，或者使用cv2.circle如果允许
+                    # 这里保持原有的像素点绘制逻辑，但半径是关键
+                    for r_offset in range(-current_radius, current_radius + 1):
+                        for c_offset in range(-current_radius, current_radius + 1):
+                            if r_offset**2 + c_offset**2 <= current_radius**2:
                                 plot_y = np.clip(cy + r_offset, 0, canvas_size - 1)
                                 plot_x = np.clip(cx + c_offset, 0, canvas_size - 1)
                                 canvas[plot_y, plot_x] = color
             return canvas
-        return None # 其他模式暂不支持
-
+        return None
     def close(self): 
         """关闭环境，释放资源 (例如渲染窗口)"""
         if self.viewer is not None:
@@ -839,6 +862,7 @@ class OneOnOnePursuitEnv(MultiSatelliteEnvBase):
 # -------------------------------------------------------------------------------------------
 # 3. 具体任务场景类: ManyVsManyCombatEnv (多对多对抗场景)
 #    V3.5 更新: 修复终端奖励合并, 修正动作/观测空间维度, 修复 attacker_id 笔误
+#    V3.5.2: 添加调试打印
 # -------------------------------------------------------------------------------------------
 class ManyVsManyCombatEnv(MultiSatelliteEnvBase):
     def __init__(self, env_config: TypingDict[str, Any], scenario_config: TypingDict[str, Any]):
@@ -859,6 +883,10 @@ class ManyVsManyCombatEnv(MultiSatelliteEnvBase):
             "win_bonus": 500.0,                 # 胜利奖励
             "lose_penalty": -500.0,             # 失败惩罚 (应为负)
         })
+        # --- 添加调试打印 ---
+        print(f"调试信息：ManyVsManyCombatEnv 初始化，加载的奖励配置: {self.reward_config}")
+        # --------------------
+        
         self.last_known_enemy_targets: TypingDict[str, int] = {} # 记录每个智能体上一步尝试攻击的目标索引 (在对手列表中的索引)
         self.damage_info_this_step: TypingDict[str, List[TypingDict[str, Any]]] = {} # 记录本步骤中各攻击者造成的伤害事件
         
@@ -879,29 +907,53 @@ class ManyVsManyCombatEnv(MultiSatelliteEnvBase):
         self.agent_ids = self.agents
         self.team_assignments = {"team_A": self.team_A_ids, "team_B": self.team_B_ids} # 队伍分配
 
-    def _get_initial_pos_vel_for_satellite(self, agent_id: str, team_id: str, 
+
+    def _get_initial_pos_vel_for_satellite(self, agent_id: str, team_id: str,
                                            agent_idx_in_team: int, type_config: TypingDict
-                                          ) -> Tuple[np.ndarray, np.ndarray]: 
-        """为多对多场景设置卫星的初始位置和速度，使两队在战场两侧对峙"""
-        spacing = float(self.scenario_config.get("initial_spacing", 20000.0)) # 智能体间距
-        team_offset_x = float(self.scenario_config.get("initial_team_offset_x", 250000.0)) # 队伍在X轴上的偏移
-        
-        num_in_this_team = self.num_team_A if team_id == "team_A" else self.num_team_B # 当前队伍的智能体数量
-        
-        if team_id == "team_A": 
-            pos_x = -team_offset_x - agent_idx_in_team * spacing # A队在X轴负方向
-            vel_x = np.random.uniform(5, 15) # A队初始向X轴正方向运动
-        else: # team_B
-            pos_x = team_offset_x + agent_idx_in_team * spacing # B队在X轴正方向
-            vel_x = np.random.uniform(-15, -5) # B队初始向X轴负方向运动
-        
-        # 在Y,Z平面上散开，并加入随机性
-        pos_y = np.random.uniform(-50000,50000) + (agent_idx_in_team - num_in_this_team / 2.0) * spacing * 0.5
-        pos_z = np.random.uniform(-10000,10000)
-        vel_y = np.random.uniform(-5,5)
-        vel_z = np.random.uniform(-2,2)
-        
-        return np.array([pos_x,pos_y,pos_z]), np.array([vel_x,vel_y,vel_z])
+                                          ) -> Tuple[np.ndarray, np.ndarray]:
+        # 从场景配置中获取集群和速度参数
+        team_center_x = float(self.scenario_config.get("team_center_x_offset", 2000000.0)) # 2000 km
+
+        # 集群内各方向的最大随机偏移（卫星将在此范围内随机分布）
+        cluster_dx = float(self.scenario_config.get("cluster_spread_x", 200000.0)) # +/- 200 km from team_center_x
+        cluster_dy = float(self.scenario_config.get("cluster_spread_y", 200000.0)) # +/- 200 km in Y
+        cluster_dz = float(self.scenario_config.get("cluster_spread_z", 100000.0)) # +/- 100 km in Z
+
+        # 相向移动的X方向速度大小范围 (m/s)
+        vel_x_closing_min, vel_x_closing_max = self.scenario_config.get("vel_x_magnitude_range_closing", [80.0, 120.0])
+        # YZ方向的随机速度大小范围 (m/s)
+        vel_yz_random_min, vel_yz_random_max = self.scenario_config.get("vel_yz_magnitude_range_random", [5.0, 20.0])
+
+        base_x_offset = 0.0
+        vel_x_direction = 0.0
+
+        # 根据队伍ID（例如"team_A"或"team_B"）确定基础X偏移和速度方向
+        # 假设 team_A_ids = ["teamA_0", ...] and team_B_ids = ["teamB_0", ...]
+        # 这需要确保 self.team_A_ids 和 self.team_B_ids 在 __init__ 中被正确设置
+        current_team_prefix = team_id # In base class, team_id passed is like "team_A", "team_B"
+
+        if team_id == "team_A": # Checks if team_id starts with "teamA"
+            base_x_offset = -team_center_x
+            vel_x_direction = 1.0 # Team A moves towards positive X
+        elif team_id == "team_B": # Checks if team_id starts with "teamB"
+            base_x_offset = team_center_x
+            vel_x_direction = -1.0 # Team B moves towards negative X
+        else: # Fallback or error
+            print(f"Warning: Unrecognized team_id '{team_id}' in _get_initial_pos_vel_for_satellite. Using default offset/velocity.")
+
+
+        # 在集群内随机生成位置
+        # 每个卫星在队伍中心点 (base_x_offset, 0, 0) 附近随机偏移
+        pos_x = base_x_offset + np.random.uniform(-cluster_dx, cluster_dx)
+        pos_y = np.random.uniform(-cluster_dy, cluster_dy)
+        pos_z = np.random.uniform(-cluster_dz, cluster_dz)
+
+        # 生成速度
+        vel_x = vel_x_direction * np.random.uniform(vel_x_closing_min, vel_x_closing_max)
+        vel_y = np.random.uniform(-vel_yz_random_max, vel_yz_random_max) # Symmetric random
+        vel_z = np.random.uniform(-vel_yz_random_max, vel_yz_random_max) # Symmetric random
+
+        return np.array([pos_x, pos_y, pos_z], dtype=np.float32), np.array([vel_x, vel_y, vel_z], dtype=np.float32)
 
     def _define_spaces(self): 
         """定义多对多战斗的观测空间和动作空间"""
@@ -1086,6 +1138,9 @@ class ManyVsManyCombatEnv(MultiSatelliteEnvBase):
 
             # 3. 战斗行为的奖励/惩罚 (造成伤害、摧毁敌人)
             if agent_id in self.damage_info_this_step: # 如果该智能体在本步骤中造成了伤害
+                # --- 添加调试打印 ---
+                print(f"调试信息：步骤 {self._current_step}, 智能体 {agent_id} 造成了伤害事件: {self.damage_info_this_step[agent_id]}") 
+                # --------------------
                 num_successful_shots_this_agent = 0 # 记录本智能体成功射击次数
                 for attack_event in self.damage_info_this_step[agent_id]:
                     num_successful_shots_this_agent +=1
@@ -1100,11 +1155,30 @@ class ManyVsManyCombatEnv(MultiSatelliteEnvBase):
                     
                     # 摧毁敌人的奖励
                     if attack_event["destroyed_target"]:
-                        rewards[agent_id] += rc.get("destroyed_enemy_factor",0.0)
+                        # --- 添加调试打印 ---
+                        destroy_reward = rc.get("destroyed_enemy_factor", 0.0)
+                        team_destroy_reward = rc.get("team_destroyed_enemy_factor", 0.0)
+                        print(f"调试信息：步骤 {self._current_step}, 智能体 {agent_id} 的攻击事件摧毁了 {attack_event['target_id']}!")
+                        print(f"    摧毁奖励因子: {destroy_reward}, 团队摧毁奖励因子: {team_destroy_reward}")
+                        print(f"    {agent_id} 的奖励（添加前）: {rewards[agent_id]:.4f}")
+                        # --------------------
+                        
+                        rewards[agent_id] += destroy_reward
+                        
+                        # --- 添加调试打印 ---
+                        print(f"    {agent_id} 的奖励（添加摧毁奖励后）: {rewards[agent_id]:.4f}")
+                        # --------------------
+                        
                         # 摧毁敌人的团队奖励
                         for teammate_id in self._get_teammate_ids(agent_id): 
                             if not self.satellites[teammate_id].is_destroyed:
-                                rewards[teammate_id] += rc.get("team_destroyed_enemy_factor",0.0)
+                                # --- 添加调试打印 ---
+                                teammate_reward_before = rewards.get(teammate_id, 0.0)
+                                # --------------------
+                                rewards[teammate_id] += team_destroy_reward
+                                # --- 添加调试打印 ---
+                                print(f"    队友 {teammate_id} 的奖励（添加前）: {teammate_reward_before:.4f}, （添加团队摧毁奖励后）: {rewards.get(teammate_id, 0.0):.4f}")
+                                # --------------------
                 
                 # 消耗弹药的惩罚 (按成功射击次数计算)
                 # ammo_consumption_penalty_factor 在配置中应为负值
@@ -1138,6 +1212,12 @@ class ManyVsManyCombatEnv(MultiSatelliteEnvBase):
                     if mate_info.get("just_destroyed_this_step", False): 
                          # ally_destroyed_penalty_factor 在配置中应为负值
                          rewards[agent_id] += rc.get("ally_destroyed_penalty_factor",0.0) 
+        
+        # --- 添加调试打印 ---
+        for agent_id in self.agents:
+             if not self.satellites[agent_id].is_destroyed:
+                 print(f"调试信息：步骤 {self._current_step}, 计算完奖励后，智能体 {agent_id} 的总即时奖励: {rewards[agent_id]:.4f}")
+        # --------------------
         return rewards
         
     def _check_episode_end(self) -> Tuple[TypingDict[str, bool], TypingDict[str, bool]]:
@@ -1212,6 +1292,9 @@ class ManyVsManyCombatEnv(MultiSatelliteEnvBase):
             # 如果游戏未全局结束，检查是否有智能体因燃料耗尽而单独终止
             for agent_id in self.agents:
                 if not self.satellites[agent_id].is_destroyed and self.satellites[agent_id].current_fuel <= 0:
+                    # --- 添加调试打印 ---
+                    print(f"调试信息：智能体 {agent_id} 在步骤 {self._current_step} 因燃料耗尽而被摧毁。") 
+                    # --------------------
                     self.satellites[agent_id].is_destroyed = True # 标记为被摧毁
                     terminated[agent_id] = True # 该智能体单独终止
                     if agent_id not in self.infos: self.infos[agent_id] = {}
@@ -1279,7 +1362,13 @@ class ManyVsManyCombatEnv(MultiSatelliteEnvBase):
         if terminated.get("__all__", False) or truncated.get("__all__", False): # 使用 .get 避免KeyError
             for agent_id in self.agents:
                 immediate_rewards[agent_id] += self.current_rewards_cache.get(agent_id, 0.0)
-        
+
+        # 将本步骤处理过程中记录的伤害事件添加到info字典，以便主程序后续处理
+        if "__common__" not in info: info["__common__"] = {}
+        # 注意：self.damage_info_this_step 是在 super().step() 中被 _handle_scenario_specific_actions 填充的
+        # 在这里复制它，因为在下个step开始时它会被清空
+        info["__common__"]["damage_events_this_step"] = self.damage_info_this_step.copy()
+
         return obs, immediate_rewards, terminated, truncated, info
 
 # -------------------------------------------------------------------------------------------
@@ -1360,7 +1449,7 @@ class SatelliteMultiAgentEnv(RawMultiAgentEnv): # 继承自Xuance的原始多智
         info["__common__"]["episode_step"] = self._episode_step
         return obs,rewards,terminated,truncated,info
 
-    def render(self,mode:str='human') -> Optional[np.ndarray]: 
+    def render(self,mode:str='rgb_array') -> Optional[np.ndarray]: 
         """渲染环境"""
         return self.scenario_env.render(mode=mode)
 
@@ -1380,156 +1469,372 @@ class SatelliteMultiAgentEnv(RawMultiAgentEnv): # 继承自Xuance的原始多智
         """获取全局状态"""
         return self.scenario_env.state()
 
-# --- 主测试代码块 (V3.5 - 修正1v1测试的配置键名) ---
+# --- 主测试代码块 (V3.5.2 - 更新7v7测试配置并运行100步) ---
 if __name__ == '__main__':
     from argparse import Namespace # 用于创建类似字典的配置对象
     # from copy import deepcopy # 当前未使用
 
+    # --- 1v1 测试 (保持不变) ---
     print("--- 测试 One-on-One Pursuit 环境 (含质量和推力) ---")
-    # 定义用于场景配置和队伍组成键的队伍名称
     pursuer_team_name_test = "team_A"
     evader_team_name_test = "team_B"
-
     pursuit_scenario_config_main = { 
-        "scenario_id": "one_on_one_pursuit", # 场景ID
-        "max_episode_steps": 500, # 最大回合步数
-        "initial_pursuer_pos": [-50000.0, 0.0, 0.0], "initial_evader_pos": [50000.0, 0.0, 0.0], # 初始位置
-        "initial_pursuer_vel": [10.0, 0.0, 0.0], "initial_evader_vel": [-10.0, 0.0, 0.0],       # 初始速度
-        "d_capture_1v1": 5000.0, # 捕获距离阈值
-        "time_penalty_1v1": -0.05, # 时间惩罚 (确保为负)
-        "explicit_force_penalty_factor_1v1": 0.00001, # 推力惩罚因子 (在奖励计算中会减去，所以正值代表惩罚幅度)
-        
-        "pursuer_team_name": pursuer_team_name_test, # 在场景中定义队伍名称
+        "scenario_id": "one_on_one_pursuit", 
+        "max_episode_steps": 500, 
+        "initial_pursuer_pos": [-50000.0, 0.0, 0.0], "initial_evader_pos": [50000.0, 0.0, 0.0],
+        "initial_pursuer_vel": [10.0, 0.0, 0.0], "initial_evader_vel": [-10.0, 0.0, 0.0],
+        "d_capture_1v1": 5000.0, 
+        "time_penalty_1v1": -0.05, 
+        "explicit_force_penalty_factor_1v1": 0.00001, 
+        "pursuer_team_name": pursuer_team_name_test, 
         "evader_team_name": evader_team_name_test,
-        # 队伍组成配置的键名必须与队伍名称匹配, 例如 "team_A_composition"
         f"{pursuer_team_name_test}_composition": ["pursuer_heavy"], 
         f"{evader_team_name_test}_composition": ["evader_light"],
     }
     general_env_config_dict_1v1_main = { 
-        "env_name": "SatelliteUnifiedTest", "env_id": "one_on_one_pursuit", # 环境名和场景ID
-        "step_time_interval": 20.0, # 时间步长
-        "action_scale": 20.0, # 动作缩放因子 (如果归一化动作为1.0，则最大推力为此值)
-        "use_cw_dynamics": True, # 使用CW动力学
-        "cw_ref_inertial_pos": [0.,0.,0.], "cw_ref_inertial_vel": [0.,0.,0.], # CW参考轨道参数
-        "satellite_types": { # 定义卫星类型
+        "env_name": "SatelliteUnifiedTest", "env_id": "one_on_one_pursuit", 
+        "step_time_interval": 20.0, 
+        "action_scale": 20.0, 
+        "use_cw_dynamics": True, 
+        "satellite_types": { 
             "default": {"mass": 100.0, "max_total_thrust": 10.0, "max_fuel": 500, "fuel_consumption_per_newton_second": 0.01, "type_name":"default_sat"},
             "pursuer_heavy": {"mass": 150.0, "max_total_thrust": 15.0, "max_fuel": 1200, "fuel_consumption_per_newton_second": 0.015, "type_name": "pursuer_heavy"},
             "evader_light": {"mass": 80.0, "max_total_thrust": 8.0, "max_fuel": 700, "fuel_consumption_per_newton_second": 0.008, "type_name": "evader_light"}
         },
-        "scenario_configs": { # 此外部字典的键是 scenario_id
-            "one_on_one_pursuit": pursuit_scenario_config_main # 对应的场景配置
+        "scenario_configs": { 
+            "one_on_one_pursuit": pursuit_scenario_config_main 
         }
     }
-    config_namespace_1v1_main = Namespace(**general_env_config_dict_1v1_main) # 转换为Namespace对象
-
+    config_namespace_1v1_main = Namespace(**general_env_config_dict_1v1_main) 
     try:
-        env_1v1 = SatelliteMultiAgentEnv(config_namespace_1v1_main) # 创建环境实例
+        env_1v1 = SatelliteMultiAgentEnv(config_namespace_1v1_main) 
         print(f"1v1 环境 '{env_1v1.scenario_env.env_id}' 创建成功。")
         print(f"  智能体: {env_1v1.agents}")
-        # 打印智能体类型以确认配置是否正确加载
         pursuer_actual_id = env_1v1.scenario_env.pursuer_id
         evader_actual_id = env_1v1.scenario_env.evader_id
         print(f"  追逐者ID: {pursuer_actual_id}, 类型: {env_1v1.scenario_env.satellites[pursuer_actual_id].type}")
         print(f"  逃跑者ID: {evader_actual_id}, 类型: {env_1v1.scenario_env.satellites[evader_actual_id].type}")
-
-        obs, info = env_1v1.reset() # 重置环境
-        
-        for i in range(10): # 运行少量步骤进行快速测试
-            actions = {aid: env_1v1.action_space[aid].sample() for aid in env_1v1.agents} # 随机采样动作
-            o,r,t,tc,step_info = env_1v1.step(actions) # 执行一步
-            
-            # 打印一些关键信息
-            # 使用 .get() 避免因字典键不存在而引发的KeyError
+        obs, info = env_1v1.reset() 
+        for i in range(10): 
+            actions = {aid: env_1v1.action_space[aid].sample() for aid in env_1v1.agents} 
+            o,r,t,tc,step_info = env_1v1.step(actions) 
             p_fuel = step_info.get(pursuer_actual_id,{}).get('fuel',0)
             e_fuel = step_info.get(evader_actual_id,{}).get('fuel',0)
             p_pos = step_info.get(pursuer_actual_id,{}).get('pos',np.zeros(3))
             e_pos = step_info.get(evader_actual_id,{}).get('pos',np.zeros(3))
             dist = np.linalg.norm(p_pos - e_pos)
-
             if i % 1 == 0 or t.get("__all__", False) or tc.get("__all__", False): 
                 print(f"步骤 {i+1}: P_奖励={r.get(pursuer_actual_id,0):.2f}, E_奖励={r.get(evader_actual_id,0):.2f}, "
                       f"P_燃料={p_fuel:.1f}, E_燃料={e_fuel:.1f}, "
                       f"距离={dist:.0f}")
-            if t.get("__all__", False) or tc.get("__all__", False): # 如果回合结束
+            if t.get("__all__", False) or tc.get("__all__", False): 
                 common_step_info = step_info.get('__common__',{})
                 term_reason = common_step_info.get('termination_reason', common_step_info.get('winner', 'N/A'))
                 print(f"回合结束原因: {term_reason}")
                 break
-        env_1v1.close() # 关闭环境
+        env_1v1.close() 
     except Exception as e: 
         print(f"1v1测试出错: {e}")
-        import traceback; traceback.print_exc() # 打印详细错误信息
+        import traceback; traceback.print_exc() 
 
-    print("\n--- 测试 Many-vs-Many Combat 环境 (例: 7v7) ---")
-    num_a_test = 7 # 使用较小队伍规模进行快速测试
-    num_b_test = 7
-    combat_scenario_config_test = {
-        "scenario_id": "many_vs_many_combat", "max_episode_steps": 500, # 较短的回合
-        "num_team_A": num_a_test, 
-        "num_team_B": num_b_test,
-        "team_A_composition": ["fighter_std"] * num_a_test, # A队组成
-        "team_B_composition": ["fighter_std"] * num_b_test, # B队组成 (例如，战斗机 vs 战斗机)
-        "initial_spacing": 10000.0, "initial_team_offset_x": 100000.0, # 初始布局参数
-        # 观测的最近敌人/队友数量 (不超过实际数量)
-        "observe_n_closest_enemies": min(num_b_test, 2), 
-        "observe_n_closest_teammates": min(num_a_test -1 if num_a_test > 0 else 0, 1), 
-        "reward_config_combat": { # 战斗奖励配置
-            "damage_dealt_factor": 12.0, "team_damage_dealt_factor": 2.5,
-            "destroyed_enemy_factor": 150.0, "team_destroyed_enemy_factor": 30.0,
-            "health_lost_penalty_factor": -0.0, # 通常为负，如果不需要则设为0
-            "ally_destroyed_penalty_factor": -60.0,
-            "explicit_force_penalty_factor": -0.00001, # 确保惩罚因子为负
-            "ammo_consumption_penalty_factor": -0.15,
-            "time_penalty_factor": -0.02,
-            "win_bonus": 700.0, "lose_penalty": -700.0,
+  # --- 7v7 测试 (根据用户要求更新) ---
+    print("\n--- 测试 GEO 集群对抗环境 (燃料调整) ---")
+    num_agents_per_team = 7
+
+    geo_cluster_fighter_type = {
+        "mass": 1000.0, "max_total_thrust": 100.0, "max_fuel": 1000.0,
+        "fuel_consumption_per_newton_second": 0.002, "max_health": 100.0,
+        "can_attack": True,
+        "weapon_range": 1000000.0,  # 1000 km (减小武器射程，迫使更近距离交战)
+        "weapon_damage": 35.0, "max_ammo": 20, # 增加弹药
+        "fire_cooldown_steps": 2, # 略微减少冷却
+        "sensor_range": 3000000.0, # 3000 km (需大于武器射程和初始间隔)
+        "type_name": "geo_cluster_fighter"
+    }
+
+    geo_cluster_combat_scenario_config = {
+        "scenario_id": "many_vs_many_combat",
+        "max_episode_steps": 150,  # 减少总步数，因为交战会很快
+        "num_team_A": num_agents_per_team, "num_team_B": num_agents_per_team,
+        "team_A_composition": ["geo_cluster_fighter"] * num_agents_per_team,
+        "team_B_composition": ["geo_cluster_fighter"] * num_agents_per_team,
+
+        "team_center_x_offset": 750000.0,    # 750 km (显著减小初始间隔)
+        "cluster_spread_x": 200000.0,       # 200 km
+        "cluster_spread_y": 250000.0,       # 250 km (保持Y方向较大散布以应对漂移)
+        "cluster_spread_z": 50000.0,        # 50 km
+
+        "vel_x_magnitude_range_closing": [150.0, 200.0], # 提高X方向相向初速 (m/s)
+        "vel_yz_magnitude_range_random": [10.0, 30.0],   # Y,Z方向随机初速 (m/s)
+
+        "observe_n_closest_enemies": 3, "observe_n_closest_teammates": 3,
+        "reward_config_combat": {
+            "damage_dealt_factor": 20.0, "team_damage_dealt_factor": 5.0, # 增加打击回报
+            "destroyed_enemy_factor": 250.0, "team_destroyed_enemy_factor": 50.0,
+            "health_lost_penalty_factor": -0.5, "ally_destroyed_penalty_factor": -75.0,
+            "explicit_force_penalty_factor": -0.00005, # 略微减少推力惩罚
+            "ammo_consumption_penalty_factor": -0.1, # 略微减少弹药惩罚
+            "time_penalty_factor": -0.02, "win_bonus": 1000.0, "lose_penalty": -1000.0,
         }
     }
-    general_env_config_dict_combat_test = {
-        "env_name": "SatelliteUnifiedTest", "env_id": "many_vs_many_combat",
-        "step_time_interval": 15.0, 
-        "action_scale": 15.0, 
-        "use_cw_dynamics": True, 
-        "satellite_types": { 
-            "default": {"mass": 100.0, "max_total_thrust": 10.0, "max_fuel": 500, "fuel_consumption_per_newton_second": 0.01, "type_name":"default_sat"},
-            "fighter_std": {"mass": 120.0, "max_total_thrust": 20.0, "max_fuel": 800, "max_health": 120, "can_attack": True, "weapon_range": 70000, "weapon_damage": 20, "max_ammo": 15, "fire_cooldown_steps": 2, "sensor_range": 180000, "fuel_consumption_per_newton_second": 0.012, "type_name": "fighter_std"},
-            "scout_std": {"mass": 70.0, "max_total_thrust": 10.0, "max_fuel": 1200, "max_health": 80, "can_attack": False, "sensor_range": 250000, "fuel_consumption_per_newton_second": 0.007, "type_name": "scout_std"}
+    # --- 通用环境配置 (增加 seed) ---
+    env_seed = 42 # 您可以选择任何整数作为种子
+    general_env_config_geo_cluster = {
+        "env_name": "SatelliteGEOQuickEngageTest",
+        "env_id": "many_vs_many_combat",
+        "seed": env_seed, # <--- 在这里添加种子
+        "step_time_interval": 20.0, "action_scale": 100.0, "use_cw_dynamics": True,
+        "satellite_types": {
+            "default": geo_cluster_fighter_type.copy(),
+            "geo_cluster_fighter": geo_cluster_fighter_type,
         },
-        "scenario_configs": { 
-             "many_vs_many_combat": combat_scenario_config_test 
-        }
+        "scenario_configs": {"many_vs_many_combat": geo_cluster_combat_scenario_config}
     }
-    config_namespace_combat_test = Namespace(**general_env_config_dict_combat_test)
+    
+    config_namespace_geo_cluster = Namespace(**general_env_config_geo_cluster)
+
+    # --- 设置随机种子 ---
+    np.random.seed(env_seed)
+    random.seed(env_seed)
+    # 注意: Gymnasium 环境的种子在 reset 时设置
+    # 用于存储每个时间步所有智能体的3D状态
+    # trajectory_snapshots[step] = [{'id': aid, 'pos': [x,y,z], 'team': team_id, 'alive': True/False}, ...]
+    trajectory_snapshots = []
+    # 用于存储每个智能体的完整路径
+    # satellite_paths[aid] = [[x0,y0,z0], [x1,y1,z1], ...]
+    satellite_paths = {}
+    satellite_paths = {}
+    killing_blow_arrows = [] # 存储 {'step': step_idx, 'attacker_id': ..., 'target_id': ..., 'attacker_pos': ..., 'target_pos': ..., 'team': ...}
+
+    run_steps = int(geo_cluster_combat_scenario_config["max_episode_steps"])
 
     try:
-        env_combat_test = SatelliteMultiAgentEnv(config_namespace_combat_test)
-        print(f"对抗 {num_a_test}v{num_b_test} 环境 '{env_combat_test.scenario_env.env_id}' 创建成功。智能体总数: {len(env_combat_test.agents)}")
-        # 可以取消注释以下行来打印更详细的队伍信息
-        # print(f"  A队智能体 ({len(env_combat_test.scenario_env.team_A_ids)}): {env_combat_test.scenario_env.team_A_ids}")
-        # print(f"  B队智能体 ({len(env_combat_test.scenario_env.team_B_ids)}): {env_combat_test.scenario_env.team_B_ids}")
-        # print(f"  A队类型: {[env_combat_test.scenario_env.satellites[aid].type for aid in env_combat_test.scenario_env.team_A_ids]}")
-        # print(f"  B队类型: {[env_combat_test.scenario_env.satellites[aid].type for aid in env_combat_test.scenario_env.team_B_ids]}")
+        env_geo_combat = SatelliteMultiAgentEnv(config_namespace_geo_cluster)
+        print(f"GEO 集群对抗环境(3D) '{env_geo_combat.scenario_env.env_id}' 创建成功.")
+        # 在 reset 时传入种子
+        obs_c, info_c = env_geo_combat.reset(seed=env_seed)
 
-        obs_c, info_c = env_combat_test.reset()
-        for i in range(10): # 运行少量步骤
-            actions_c = {aid: env_combat_test.action_space[aid].sample() for aid in env_combat_test.agents}
-            oc,rc,tc,tcc,step_info_c = env_combat_test.step(actions_c)
-            
-            # 安全地获取用于打印奖励的智能体ID (如果队伍存在)
-            teamA0_id = env_combat_test.scenario_env.team_A_ids[0] if env_combat_test.scenario_env.team_A_ids else None
-            teamB0_id = env_combat_test.scenario_env.team_B_ids[0] if env_combat_test.scenario_env.team_B_ids else None
-            rew_A0_val = rc.get(teamA0_id, 0) if teamA0_id else 0 
-            rew_B0_val = rc.get(teamB0_id, 0) if teamB0_id else 0
-            
-            common_info_step = step_info_c.get('__common__',{}) # 获取通用信息
-            if i % 1 == 0 or tc.get("__all__", False) or tcc.get("__all__", False): 
-                print(f"步骤 {i+1} 对抗: A0_奖励={rew_A0_val:.2f}, B0_奖励={rew_B0_val:.2f}, "
-                      f"A_存活={common_info_step.get('num_alive_team_A','N/A')}, B_存活={common_info_step.get('num_alive_team_B','N/A')}")
-            if tc.get("__all__", False) or tcc.get("__all__", False): 
+        # 初始化 satellite_paths 字典
+        for agent_id in env_geo_combat.agents:
+            satellite_paths[agent_id] = []
+
+        print(f"\n开始 GEO 集群对抗模拟 ({run_steps} 步) 用于3D可视化数据收集...")
+        for i in range(run_steps):
+            # 在循环开始时记录当前状态
+            current_step_snapshot = []
+                 # 获取当前卫星状态 (用于判断是否刚被摧毁 & 记录攻击者/目标位置)
+            sats_before_step = {}
+
+            for agent_id in env_geo_combat.agents:
+                sat = env_geo_combat.scenario_env.satellites[agent_id]
+                snapshot_data = {
+                    'id': sat.id,
+                    'pos': sat.pos.copy(), # 存储3D位置
+                    'team': sat.team_id,
+                    'is_destroyed': sat.is_destroyed
+                }
+                current_step_snapshot.append(snapshot_data)
+                if not sat.is_destroyed: # 只记录存活卫星的路径点
+                    satellite_paths[agent_id].append(sat.pos.copy())
+                elif satellite_paths[agent_id] and not np.all(satellite_paths[agent_id][-1] == sat.pos): # 如果被摧毁了，确保路径最后一点是其最终位置
+                     # 通常不需要，因为我们只在存活时添加。但如果想标记最后位置，可以考虑
+                     pass
+
+
+            trajectory_snapshots.append(current_step_snapshot)
+
+            actions_c = {aid: env_geo_combat.action_space[aid].sample() for aid in env_geo_combat.agents}
+            oc, rc, tc, tcc, step_info_c = env_geo_combat.step(actions_c)
+            # --- 检查并记录“击毁”事件 ---
+            # 获取当前步骤实际发生的伤害事件 (需要修改 ManyVsManyCombatEnv.step 来返回这个信息)
+            # *假设* step_info_c["__common__"]["damage_events_this_step"] 包含 {attacker_id: [event1, event2,...]}
+            # event = {"target_id": target_id, "damage": damage_amount, "destroyed_target": bool}
+            damage_events = step_info_c.get("__common__", {}).get("damage_events_this_step", {})
+
+            # 获取步骤结束后的卫星状态
+            sats_after_step = {}
+            for agent_id_after in env_geo_combat.agents:
+                 sat_after = env_geo_combat.scenario_env.satellites[agent_id_after]
+                 sats_after_step[agent_id_after] = {'is_destroyed': sat_after.is_destroyed}
+
+            # 查找刚刚发生的击毁事件
+            for attacker_id, events in damage_events.items():
+                attacker_info_before = sats_before_step.get(attacker_id)
+                if not attacker_info_before or attacker_info_before['is_destroyed']: continue # 攻击者在攻击前就没了，或无效
+
+                for event in events:
+                    if event["destroyed_target"]:
+                        target_id = event["target_id"]
+                        target_info_before = sats_before_step.get(target_id)
+                        target_info_after = sats_after_step.get(target_id)
+
+                        # 确认目标是在这一步从“存活”变为“被摧毁”
+                        if target_info_before and not target_info_before['is_destroyed'] and \
+                           target_info_after and target_info_after['is_destroyed']:
+                            
+                            # 记录击毁信息，用于绘制箭头
+                            # 箭头起点：攻击者在本步骤开始时的位置
+                            # 箭头终点：目标在本步骤开始时的位置（被击中时的位置）
+                            killing_blow_arrows.append({
+                                'step': i + 1, # 箭头显示在完成击毁的这一步结束后的帧
+                                'attacker_id': attacker_id,
+                                'target_id': target_id,
+                                'attacker_pos': attacker_info_before['pos'],
+                                'target_pos': target_info_before['pos'],
+                                'team': attacker_info_before['team']
+                            })
+                            # 防止重复记录同一目标被多次"击毁"（如果逻辑允许的话）
+                            sats_before_step[target_id]['is_destroyed'] = True # 标记一下，避免同一步内被重复记录
+
+
+            common_info_step = step_info_c.get('__common__', {})
+            if (i + 1) % 20 == 0 or tc.get("__all__", False) or tcc.get("__all__", False) or i == run_steps - 1:
+                print(f"步骤 {i+1}/{run_steps}: "
+                      f"A队存活={common_info_step.get('num_alive_team_A','N/A')}, "
+                      f"B队存活={common_info_step.get('num_alive_team_B','N/A')}")
+
+            if tc.get("__all__", False) or tcc.get("__all__", False):
                 winner_info = common_info_step.get('winner', 'N/A')
                 reason_info = common_info_step.get('termination_reason', 'N/A')
-                print(f"回合结束原因: {winner_info}, 具体: {reason_info}")
+                print(f"回合结束于步骤 {i+1}。原因: {winner_info}, 具体: {reason_info}")
+                # 在回合结束时，也记录最后一步的状态
+                current_step_snapshot_final = []
+                for agent_id_final in env_geo_combat.agents:
+                    sat_final = env_geo_combat.scenario_env.satellites[agent_id_final]
+                    current_step_snapshot_final.append({
+                        'id': sat_final.id, 'pos': sat_final.pos.copy(),
+                        'team': sat_final.team_id, 'is_destroyed': sat_final.is_destroyed
+                    })
+                    if not sat_final.is_destroyed: # 确保路径有最终点
+                         satellite_paths[agent_id_final].append(sat_final.pos.copy())
+                trajectory_snapshots.append(current_step_snapshot_final)
                 break
-        env_combat_test.close()
-    except Exception as e: 
-        print(f"对抗 {num_a_test}v{num_b_test} 测试出错: {e}")
-        import traceback; traceback.print_exc()
+        
+        if not (tc.get("__all__", False) or tcc.get("__all__", False)) and i == run_steps -1 : # 如果是正常运行完所有步骤
+            # 记录最后一步的状态
+            current_step_snapshot_final = []
+            for agent_id_final in env_geo_combat.agents:
+                sat_final = env_geo_combat.scenario_env.satellites[agent_id_final]
+                current_step_snapshot_final.append({
+                    'id': sat_final.id, 'pos': sat_final.pos.copy(),
+                    'team': sat_final.team_id, 'is_destroyed': sat_final.is_destroyed
+                })
+                if not sat_final.is_destroyed:
+                     satellite_paths[agent_id_final].append(sat_final.pos.copy())
+            trajectory_snapshots.append(current_step_snapshot_final)
+            print(f"模拟完成 {run_steps} 步。")
+
+
+        env_geo_combat.close()
+
+        # --- 使用 Matplotlib 3D 逐步显示轨迹 ---
+        if trajectory_snapshots:
+            print("\n--- 使用 Matplotlib 3D 逐步显示轨迹 ---")
+            fig = plt.figure(figsize=(10, 8))
+            ax = fig.add_subplot(111, projection='3d')
+
+            # 定义队伍颜色
+            team_colors_map = {
+                "team_A": 'blue',
+                "team_B": 'red',
+                "default_team": 'grey' 
+            }
+            
+            # 估算坐标轴范围，可以基于初始配置或实际数据动态调整
+            # 使用配置文件中的 team_center_x_offset 和 cluster_spread_x 来估算
+            # config_scenario = general_env_config_geo_cluster["scenario_configs"]["many_vs_many_combat"]
+            # max_x_abs = config_scenario["team_center_x_offset"] + config_scenario["cluster_spread_x"] + 2*config_scenario["vel_x_magnitude_range_closing"][1]*config_namespace_geo_cluster.step_time_interval*5 # 估算5步移动
+            # max_y_abs = config_scenario["cluster_spread_y"] + 2*config_scenario["vel_yz_magnitude_range_random"][1]*config_namespace_geo_cluster.step_time_interval*5
+            # max_z_abs = config_scenario["cluster_spread_z"] + 2*config_scenario["vel_yz_magnitude_range_random"][1]*config_namespace_geo_cluster.step_time_interval*5
+            
+            # 或者从收集到的所有数据点中找到范围
+            all_x = [p['pos'][0] for frame in trajectory_snapshots for p in frame]
+            all_y = [p['pos'][1] for frame in trajectory_snapshots for p in frame]
+            all_z = [p['pos'][2] for frame in trajectory_snapshots for p in frame]
+            
+            if not all_x: # 如果没有数据点
+                print("没有收集到轨迹数据点用于3D显示。")
+            else:
+                min_x, max_x = np.min(all_x), np.max(all_x)
+                min_y, max_y = np.min(all_y), np.max(all_y)
+                min_z, max_z = np.min(all_z), np.max(all_z)
+
+                # 为了保持立方体感，取最大跨度
+                range_x, range_y, range_z = max_x - min_x, max_y - min_y, max_z - min_z
+                max_range = np.max([range_x, range_y, range_z, 1e5]) # 避免范围为0，最小100km
+                
+                mid_x, mid_y, mid_z = (max_x+min_x)/2, (max_y+min_y)/2, (max_z+min_z)/2
+
+                ax.set_xlim(mid_x - max_range/2, mid_x + max_range/2)
+                ax.set_ylim(mid_y - max_range/2, mid_y + max_range/2)
+                ax.set_zlim(mid_z - max_range/2, mid_z + max_range/2)
+
+                # 存储当前帧需要绘制的箭头
+                arrows_to_draw_this_frame = []
+                for step_idx, snapshot in enumerate(trajectory_snapshots):
+                    ax.cla() # 清除上一帧
+                    ax.set_xlabel("X (m)")
+                    ax.set_ylabel("Y (m)")
+                    ax.set_zlabel("Z (m)")
+                    ax.set_title(f"GEO 集群对抗 3D 轨迹 - 步骤 {step_idx}")
+
+                    # 重新设置坐标轴限制，确保视图稳定
+                    ax.set_xlim(mid_x - max_range/2, mid_x + max_range/2)
+                    ax.set_ylim(mid_y - max_range/2, mid_y + max_range/2)
+                    ax.set_zlim(mid_z - max_range/2, mid_z + max_range/2)
+                    
+                    # 绘制每个卫星当前位置和轨迹
+                    for sat_data in snapshot:
+                        if not sat_data['is_destroyed']:
+                            pos = sat_data['pos']
+                            team_prefix = sat_data['team'] # e.g. "teamA"
+                            color = team_colors_map.get(team_prefix, team_colors_map["default_team"])
+                            ax.scatter(pos[0], pos[1], pos[2], c=color, marker='o', s=50) # 当前位置点大一点
+                            ax.text(pos[0], pos[1], pos[2], f"{sat_data['id'].split('_')[-1]}", size=8, zorder=1, color=color)
+
+
+                            # 绘制该卫星到当前步的轨迹线
+                            agent_id = sat_data['id']
+                            path = np.array(satellite_paths[agent_id][:step_idx+1]) # 获取到当前步骤的路径
+                            if len(path) > 1:
+                                ax.plot(path[:,0], path[:,1], path[:,2], color=color, linestyle='-', linewidth=0.8, alpha=0.7)
+                        else: # 如果被摧毁了，可以画一个不同的标记
+                            pos = sat_data['pos']
+                            team_prefix = sat_data['team']
+                            color = team_colors_map.get(team_prefix, team_colors_map["default_team"])
+                            ax.scatter(pos[0], pos[1], pos[2], c=color, marker='x', s=30, alpha=0.5) # 被摧毁的标记为 x
+                    # --- 查找并准备绘制本帧对应的击毁箭头 ---
+                    # 清空上一帧的箭头缓存
+                    arrows_to_draw_this_frame.clear()
+                    for arrow_data in killing_blow_arrows:
+                        if arrow_data['step'] == step_idx: # 击毁发生在上一步，箭头显示在这一步
+                            arrows_to_draw_this_frame.append(arrow_data)
+
+                    # --- 绘制击毁箭头 ---
+                    for arrow in arrows_to_draw_this_frame:
+                        apos = arrow['attacker_pos']
+                        tpos = arrow['target_pos']
+                        team = arrow['team']
+                        color = team_colors_map.get(team, "black") # 获取攻击方颜色
+                        
+                        # 计算向量
+                        dx, dy, dz = tpos[0]-apos[0], tpos[1]-apos[1], tpos[2]-apos[2]
+                        length = np.sqrt(dx**2 + dy**2 + dz**2)
+                        
+                        if length > 1e-3: # 避免绘制长度为0的箭头
+                            # 使用 ax.quiver 绘制箭头
+                            # length=length*0.8 表示箭头长度是实际距离的80% (避免箭头尖端正好在目标点上)
+                            # arrow_length_ratio 控制箭头头部大小相对于总长度的比例
+                            # pivot='tail' 让箭头尾部在 apos
+                            ax.quiver(apos[0], apos[1], apos[2], dx, dy, dz,
+                                    color=color, length=length*0.9, normalize=False, # 使用实际长度的90%
+                                    arrow_length_ratio=0.15, pivot='tail', linewidth=1.5, alpha=0.8)
+
+                    plt.pause(0.1) # 调整动画速度
+
+                print("3D轨迹显示完毕。关闭Matplotlib窗口以继续。")
+                plt.show() # 在循环结束后保持窗口打开，直到手动关闭
+
+    except Exception as e:
+        print(f"GEO 集群对抗(3D)测试或显示出错: {e}")
+        traceback.print_exc()
