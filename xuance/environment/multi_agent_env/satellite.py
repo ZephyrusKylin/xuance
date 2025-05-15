@@ -1542,7 +1542,7 @@ if __name__ == '__main__':
     num_agents_per_team = 7
 
     geo_cluster_fighter_type = {
-        "mass": 1000.0, "max_total_thrust": 100.0, "max_fuel": 1000.0,
+        "mass": 1000.0, "max_total_thrust": 100.0, "max_fuel": 10000.0,
         "fuel_consumption_per_newton_second": 0.002, "max_health": 100.0,
         "can_attack": True,
         "weapon_range": 1000000.0,  # 1000 km (减小武器射程，迫使更近距离交战)
@@ -1554,7 +1554,7 @@ if __name__ == '__main__':
 
     geo_cluster_combat_scenario_config = {
         "scenario_id": "many_vs_many_combat",
-        "max_episode_steps": 150,  # 减少总步数，因为交战会很快
+        "max_episode_steps": 300,  # 减少总步数，因为交战会很快
         "num_team_A": num_agents_per_team, "num_team_B": num_agents_per_team,
         "team_A_composition": ["geo_cluster_fighter"] * num_agents_per_team,
         "team_B_composition": ["geo_cluster_fighter"] * num_agents_per_team,
